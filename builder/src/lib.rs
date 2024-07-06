@@ -1,5 +1,6 @@
 use proc_macro::TokenStream;
-use syn::{parse_macro_input, DeriveInput, Ident, Type, Field};
+use syn::{parse_macro_input, DeriveInput, Ident, Type, Field, Data};
+use syn::ext::IdentExt;
 
 #[proc_macro_derive(Builder)]
 pub fn derive(input: TokenStream) -> TokenStream {
@@ -29,9 +30,25 @@ impl From<Field> for Fd {
             optional: optional
         }
     }
+}
 
+impl From<DeriveInput> for BuilderContext {
+    fn from(value: DeriveInput) -> Self {
+        let name = value.ident;
+        let fileds = if let Data::Struct(syn::DataStruct {fields:syn::Fields::Named(syn::FieldsNamed{named,..}),..}) = value.data {
+            named
+        }else{
+            panic!("Unsupported data type")
+        };
+        let fds = fileds.into_iter().map(Fd::from).collect();
+        Self {
+            name,
+            fileds:fds
+        }
+    }
+}
 
-}fn get_option_inner(ty: &Type) -> (bool, &Type) {
+fn get_option_inner(ty: &Type) -> (bool, &Type) {
     if let Type::Path(syn::TypePath { path: syn::Path { segments, .. }, .. }) = ty {
         if let Some(v) = segments.iter().next() {
             if(v.ident == "Option") {
