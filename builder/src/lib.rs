@@ -1,6 +1,8 @@
+use darling::FromField;
 use proc_macro2::{Ident, TokenStream};
 use quote::quote;
 use syn::{Data, DataStruct, DeriveInput, Field, Fields, FieldsNamed, GenericArgument, parse_macro_input, Path, Type, TypePath};
+use syn::spanned::Spanned;
 
 #[proc_macro_derive(Builder)]
 pub fn derive(input: proc_macro::TokenStream) -> proc_macro::TokenStream {
@@ -14,6 +16,14 @@ struct Fd {
     name: Ident,
     ty: Type,
     optional: bool,
+    opts: Opts
+}
+
+#[derive(Debug,Default,FromField)]
+#[darling(default,attributes(builder))]
+struct Opts {
+    each: Option<String>,
+    default: Option<String>
 }
 
 /// 我们需要的描述一个 struct 的所有信息
@@ -26,11 +36,13 @@ struct BuilderContext {
 impl From<Field> for Fd {
     fn from(f: Field) -> Self {
         let (optional, ty) = get_option_inner(&f.ty);
+        let opts = Opts::from_field(&f).unwrap_or_default();
         Self {
             // 此时，我们拿到的是 NamedFields，所以 ident 必然存在
             name: f.ident.unwrap(),
             optional,
             ty: ty.to_owned(),
+            opts
         }
     }
 }
@@ -105,7 +117,23 @@ impl BuilderContext {
     fn gen_methods(&self) -> Vec<TokenStream> {
         self.fields
             .iter()
-            .map(|Fd { name, ty, .. }| {
+            .map(|fd| {
+                let name = &fd.name;
+                let ty = &fd.ty;
+                if !fd.optional && fd.opts.each.is_some() {
+                    let each = Ident::new(fd.opts.each.as_deref().unwrap(),name.span());
+                    let (is_vec, ty) = get_vec_inner(ty);
+                    if is_vec {
+                        return quote! {
+                            pub fn #each(mut self, v: impl Into<#ty>) -> Self {
+                                let mut data = self.#name.take().unwrap_or_default();
+                                data.push(v.into());
+                                self.#name = Some(data);
+                                self
+                            }
+                        };
+                    }
+                }
                 quote! {
                     pub fn #name(mut self, v: impl Into<#ty>) -> Self {
                         self.#name = Some(v.into());
@@ -137,7 +165,17 @@ impl BuilderContext {
 }
 
 // 如果是 T = Option<Inner>，返回 (true, Inner)；否则返回 (false, T)
+// 如果是 T = Option<Inner>，返回 (true, Inner)；否则返回 (false, T)
 fn get_option_inner(ty: &Type) -> (bool, &Type) {
+    get_type_inner(ty, "Option")
+}
+
+// 如果是 T = Vec<Inner>，返回 (true, Inner)；否则返回 (false, T)
+fn get_vec_inner(ty: &Type) -> (bool, &Type) {
+    get_type_inner(ty, "Vec")
+}
+
+fn get_type_inner<'a>(ty: &'a Type, name: &str) -> (bool, &'a Type) {
     // 首先模式匹配出 segments
     if let Type::Path(TypePath {
                           path: Path { segments, .. },
@@ -145,8 +183,8 @@ fn get_option_inner(ty: &Type) -> (bool, &Type) {
                       }) = ty
     {
         if let Some(v) = segments.iter().next() {
-            if v.ident == "Option" {
-                // 如果 PathSegment 第一个是 Option，那么它内部应该是 AngleBracketed，比如 <T>
+            if v.ident == name {
+                // 如果 PathSegment 第一个是 Option/Vec 等类型，那么它内部应该是 AngleBracketed，比如 <T>
                 // 获取其第一个值，如果是 GenericArgument::Type，则返回
                 let t = match &v.arguments {
                     syn::PathArguments::AngleBracketed(a) => match a.args.iter().next() {
