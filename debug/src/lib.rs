@@ -1,126 +1,74 @@
-use darling::FromField;
-use proc_macro2::{Ident, TokenStream};
+use proc_macro2::{TokenStream};
 use quote::quote;
-use syn::{parse_macro_input, DeriveInput, Type, Field, Data, DataStruct, Fields, FieldsNamed, TypePath, Path, GenericArgument, Generics, GenericParam, parse_quote};
+use syn::{parse_macro_input, DeriveInput, Field, Data, DataStruct, Fields, FieldsNamed, Token};
+use syn::punctuated::Punctuated;
 
 #[proc_macro_derive(CustomDebug)]
 pub fn derive(input: proc_macro::TokenStream) -> proc_macro::TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
-    // let context = BuilderContext::from(input);
-    // let name = &context.name;
-    let name = input.ident;
-    //fmt.field方法中需要结构体每个字段实现Debug trait,所以第一步需要给结构体每个字段实现Debug trait
-    let generics = add_trait_bounds(input.generics);
-    // let token = quote! {
-    //     impl fmt::Debug for #name {
-    //          fn fmt(&self,fmt: &mut fmt::Formatter<'_>) -> fmt::Result {
-    //
-    //             fmt.debug_struct(#name)
-    //                .field("bar", &self.bar)
-    //                .field("baz", &self.baz)
-    //                .finish()
-    //         }
-    //     }
-    // };
-    // token.into()
+    match do_expand(&input) {
+        Ok(ret) => ret.into(),
+        Err(e) => e.to_compile_error().into()
+    }
+}
+
+fn do_expand(input: &DeriveInput) -> syn::Result<TokenStream> {
+    let ret = generate_debug_trait(&input)?;
+    Ok(ret)
+}
+
+type StructFields = Punctuated<Field,Token![,]>;
+
+fn get_fields_from_derive_input(d: &DeriveInput) -> syn::Result<&StructFields> {
+    if let Data::Struct(DataStruct{fields:Fields::Named(FieldsNamed{ref named,..}),..}) = d.data {
+        return Ok(named)
+    }else {
+        Err(syn::Error::new_spanned(d,"Must define on a Struct,not enum".to_string()))
+    }
+}
+
+
+// 自定义格式化输出需要生成fmt.debug_struct等模式代码
+// impl fmt::Debug for Foo {
+//     fn fmt(&self, fmt: &mut fmt::Formatter<'_>) -> fmt::Result {
+//         fmt.debug_struct("Foo")
+//             .field("bar", &self.bar)
+//             .field("baz", &self.baz)
+//             .finish()
+//     }
+// }
+
+fn generate_debug_trait(st: &DeriveInput) -> syn::Result<TokenStream> {
+    let fields = get_fields_from_derive_input(st)?;
+    let struct_name_ident = &st.ident;
+    let struct_name_literal = struct_name_ident.to_string();
+    //构造一个空的TokenStream,extend相当于拼接几个TokenStream为一个完整的TokenStream
+    let mut token_stream = TokenStream::new();
+    token_stream.extend(quote! {
+        fmt.debug_struct(#struct_name_literal)
+    });
+    for field in fields.iter() {
+        let field_name_ident = field.ident.as_ref().unwrap();
+        let field_name_literal = field_name_ident.to_string();
+        token_stream.extend(quote! {
+            .field(#field_name_literal,&self.#field_name_ident)
+        });
+    }
+    token_stream.extend(quote! {
+        .finish()
+    });
+
+    let token_stream_result = quote! {
+        impl std::fmt::Debug for #struct_name_ident {
+            fn fmt(&self,fmt: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                #token_stream
+            }
+        }
+    };
+    Ok(token_stream_result)
+}
+
+fn get_field_attr(field: &Field) -> syn::Result<Option<String>> {
     unimplemented!()
 }
 
-fn add_trait_bounds(mut generics: Generics) -> Generics{
-     for param in &mut generics {
-         if let GenericParam::Type(ref mut typeparam) = *param {
-             typeparam.bounds.push(parse_quote!(fmt::Debug))
-         }
-     }
-    generics
-}
-
-struct Fd {
-    name: Ident,
-    ty: Type,
-    optional: bool,
-    opts: Opts
-}
-
-#[derive(Debug,Default,FromField)]
-#[darling(default,attributes(debug))]
-struct Opts {
-    each: Option<String>,
-    default: Option<String>
-}
-
-/// 我们需要的描述一个 struct 的所有信息
-struct BuilderContext {
-    name: Ident,
-    fields: Vec<Fd>,
-}
-
-/// 把一个 Field 转换成 Fd
-impl From<Field> for Fd {
-    fn from(f: Field) -> Self {
-        let (optional, ty) = get_option_inner(&f.ty);
-        let opts = Opts::from_field(&f).unwrap_or_default();
-        Self {
-            // 此时，我们拿到的是 NamedFields，所以 ident 必然存在
-            name: f.ident.unwrap(),
-            optional,
-            ty: ty.to_owned(),
-            opts
-        }
-    }
-}
-
-/// 把 DeriveInput 转换成 BuilderContext
-impl From<DeriveInput> for BuilderContext {
-    fn from(input: DeriveInput) -> Self {
-        let name = input.ident;
-        let fields = if let Data::Struct(DataStruct {
-                                             fields: Fields::Named(FieldsNamed { named, .. }),
-                                             ..
-                                         }) = input.data
-        {
-            named
-        } else {
-            panic!("Unsupported data type");
-        };
-
-        let fds = fields.into_iter().map(Fd::from).collect();
-        Self { name, fields: fds }
-    }
-}
-
-// 如果是 T = Option<Inner>，返回 (true, Inner)；否则返回 (false, T)
-// 如果是 T = Option<Inner>，返回 (true, Inner)；否则返回 (false, T)
-fn get_option_inner(ty: &Type) -> (bool, &Type) {
-    get_type_inner(ty, "Option")
-}
-
-// 如果是 T = Vec<Inner>，返回 (true, Inner)；否则返回 (false, T)
-fn get_vec_inner(ty: &Type) -> (bool, &Type) {
-    get_type_inner(ty, "Vec")
-}
-
-fn get_type_inner<'a>(ty: &'a Type, name: &str) -> (bool, &'a Type) {
-    // 首先模式匹配出 segments
-    if let Type::Path(TypePath {
-                          path: Path { segments, .. },
-                          ..
-                      }) = ty
-    {
-        if let Some(v) = segments.iter().next() {
-            if v.ident == name {
-                // 如果 PathSegment 第一个是 Option/Vec 等类型，那么它内部应该是 AngleBracketed，比如 <T>
-                // 获取其第一个值，如果是 GenericArgument::Type，则返回
-                let t = match &v.arguments {
-                    syn::PathArguments::AngleBracketed(a) => match a.args.iter().next() {
-                        Some(GenericArgument::Type(t)) => t,
-                        _ => panic!("Not sure what to do with other GenericArgument"),
-                    },
-                    _ => panic!("Not sure what to do with other PathArguments"),
-                };
-                return (true, t);
-            }
-        }
-    }
-    (false, ty)
-}
