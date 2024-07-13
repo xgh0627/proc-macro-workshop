@@ -1,11 +1,12 @@
 use proc_macro2::{TokenStream};
 use quote::quote;
-use syn::{parse_macro_input, DeriveInput, Field, Data, DataStruct, Fields, FieldsNamed, Token};
+use syn::{parse_macro_input, DeriveInput, Field, Data, DataStruct, Fields, FieldsNamed, Token, Attribute, Meta, MetaNameValue, Lit};
 use syn::punctuated::Punctuated;
 
-#[proc_macro_derive(CustomDebug)]
+#[proc_macro_derive(CustomDebug,attributes(debug))]
 pub fn derive(input: proc_macro::TokenStream) -> proc_macro::TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
+    eprintln!("{:#?}",input);
     match do_expand(&input) {
         Ok(ret) => ret.into(),
         Err(e) => e.to_compile_error().into()
@@ -50,9 +51,16 @@ fn generate_debug_trait(st: &DeriveInput) -> syn::Result<TokenStream> {
     for field in fields.iter() {
         let field_name_ident = field.ident.as_ref().unwrap();
         let field_name_literal = field_name_ident.to_string();
-        token_stream.extend(quote! {
-            .field(#field_name_literal,&self.#field_name_ident)
-        });
+        if let Some(str) = get_field_attr(field)?{
+            token_stream.extend(quote! {
+                .field(#field_name_literal,&std::format_args!(#str,self.#field_name_ident))
+            });
+        }else{
+            token_stream.extend(quote! {
+                .field(#field_name_literal,&self.#field_name_ident)
+            })
+        }
+
     }
     token_stream.extend(quote! {
         .finish()
@@ -69,6 +77,18 @@ fn generate_debug_trait(st: &DeriveInput) -> syn::Result<TokenStream> {
 }
 
 fn get_field_attr(field: &Field) -> syn::Result<Option<String>> {
-    unimplemented!()
+    let attrs = &field.attrs;
+    for attribute in attrs {
+        if let Attribute{meta:Meta::NameValue(MetaNameValue{path,value,..}),..} = attribute {
+            println!("是否为debug,{}",path.is_ident("debug"));
+            if path.is_ident("debug") {
+                if let syn::Expr::Lit( syn::ExprLit{lit:Lit::Str(ident_str),..}) = value {
+                    println!("找到属性字符串了,{}",ident_str.value());
+                   return Ok(Some(ident_str.value()));
+                }
+            }
+        }
+    }
+    Ok(None)
 }
 
